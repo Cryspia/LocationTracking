@@ -1,0 +1,5 @@
+*.o
+*.gch
+*.ignore
+.DS_Store
+tags

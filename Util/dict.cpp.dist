@@ -1,0 +1,244 @@
+#include "dict.hpp"
+
+namespace TractUtil
+{
+    Dict::Branch::Branch():
+        midPoint(1, 128, FLOAT_CV, 0.0),
+        belongs(),
+        children(),
+        index(-1)
+    {}
+
+    Dict::Dict(): root(new Branch()), leafCount(0),
+                       leaves(), wi(), pQue({root}) {}
+
+    double Dict::StandardDev(const vector<shared_ptr<Branch>>& iMeans,
+                             const size_t& iSum) const
+    {
+        size_t len = iMeans.size();
+        double mean = 0.0;
+        double dev = 0.0;
+
+        if (len <= 0 || iSum <=0)
+        // The input vector is actually empty.
+        {
+            return 0.0;
+        }
+
+        mean = static_cast<double>(iSum) / len;
+
+        for (const auto& i: iMeans)
+        // Calculate deviation
+        {
+            double dif = i->belongs.size() - mean;
+            dev += dif * dif;
+        }
+
+        return sqrt(dev);
+    }
+
+    bool Dict::IsLeaf(shared_ptr<Branch>& iBranch)
+    {
+        size_t cnt = iBranch->belongs.size();
+        if (cnt > K)
+        {
+            bool inRange = true;
+            for (const auto& i: iBranch->belongs)
+            {
+                if (norm(iBranch->midPoint, i->descriptor, NORM_L2) > bound)
+                {
+                    inRange = false;
+                    break;
+                }
+            }
+            if (!inRange)
+            // Not a leaf
+            {
+                return false;
+            }
+        }
+
+        // Is a leaf
+        cout<<cnt<<' ';
+        leaves.push_back(iBranch);
+        iBranch->index = leafCount;
+        ++ leafCount;
+        return true;
+    }
+
+    void Dict::GetDescriptor(Mat& ioVector) const
+    {
+        if (ioVector.rows != 1 || static_cast<size_t>(ioVector.cols) != leafCount)
+        {
+            cout<< "GetDescriptor dismatch"<<endl;
+            return;
+        }
+        for (size_t i = 0; i < leafCount; ++i)
+        {
+            ioVector.at<double>(0, i) *= wi[i];
+        }
+        normalize(ioVector, ioVector);
+        ioVector.convertTo(ioVector, FLOAT_CV);
+    }
+
+    void Dict::BuildDict(vector<Entry>& iWords,
+                         const size_t&& iCount,
+                         vector<Mat>& oArticles)
+    {
+        srand((size_t)time(0));
+
+        for (auto& i: iWords)
+        // Record the address for the entries
+        {
+            root->belongs.push_back(&i);
+            root->midPoint += i.descriptor;
+        }
+        root->midPoint /= iWords.size();
+
+        while (pQue.size())
+        {
+            if (!IsLeaf(pQue.front()))
+            // The branch can still be divided
+            {
+                size_t entryLen = pQue.front()->belongs.size();
+                double minSDev = DBL_MAX;
+                vector<shared_ptr<Branch>> bestDiv = {};
+                vector<shared_ptr<Branch>> presDiv = {};
+                unordered_map<size_t, bool> numUsed;
+
+                for (size_t l = 0; l < attemps; ++l)
+                {
+                    presDiv.clear();
+                    numUsed.clear();
+                    for (size_t i = 0; i < K; ++i)
+                    {
+                        size_t index;
+                        while (index = rand()%entryLen, numUsed[index]);
+                        numUsed[index] = true;
+                        presDiv.push_back(shared_ptr<Branch>(new Branch()));
+                        presDiv.back()->midPoint = pQue.front()->belongs[index]
+                                                               ->descriptor;
+                    }
+                    double pSDev = 0.0;
+                    double sDev = 0.0;
+
+                    for (size_t h = 0; h < maxLoop; ++h)
+                    {
+                        for (auto& i: presDiv)
+                        {
+                            i->belongs.clear();
+                        }
+                        for (const auto& i: pQue.front()->belongs)
+                        {
+                            double minDist = DBL_MAX;
+                            shared_ptr<Branch> minBranch = nullptr;
+                            for (auto& j: presDiv)
+                            {
+                                double dist = norm(i->descriptor,
+                                            j->midPoint,
+                                            NORM_L2);
+                                if (dist <= minDist)
+                                {
+                                    minDist = dist;
+                                    minBranch = j;
+                                }
+                            }
+                            minBranch->belongs.push_back(i);
+                        }
+                        for (auto& i: presDiv)
+                        {
+                            Mat midPoint = Mat(1, 128, FLOAT_CV, 0.0);
+                            for (auto& j: i->belongs)
+                            {
+                                midPoint += j->descriptor;
+                            }
+                            if (i->belongs.size())
+                            {
+                                i->midPoint = midPoint / i->belongs.size();
+                            }
+                        }
+                        sDev = StandardDev(presDiv, entryLen);
+                        if (abs(sDev - pSDev) <= EPS)
+                        {
+                            break;
+                        }
+                        pSDev = sDev;
+                    }
+
+                    if (sDev < minSDev)
+                    {
+                        minSDev = sDev;
+                        bestDiv = move(presDiv);
+                    }
+                }
+
+                pQue.front()->children.clear();
+                for (const auto& i: bestDiv)
+                {
+                    if (i->belongs.size())
+                    {
+                        pQue.front()->children.push_back(i);
+                        pQue.push(i);
+                    }
+                }
+            }
+            pQue.pop();
+        }
+
+        cout<<endl<<leafCount<<endl;
+        oArticles = vector<Mat>(iCount, Mat(1, leafCount, FLOAT_CV, 0.0));
+        wi = vector<double>(leafCount, 0.0);
+        for (auto& i: oArticles)
+        {
+            i = Mat(1, leafCount, FLOAT_CV, 0.0);
+        }
+
+        for (size_t i = 0; i < leafCount; ++i)
+        {
+            map<size_t, bool> containWord;
+            containWord.clear();
+            for (const auto& j: leaves[i]->belongs)
+            {
+                size_t ind = j->belong;
+                oArticles[ind].at<CV_TYPE>(0, i) += (double)1.0;
+                if (!containWord[ind])
+                {
+                    ++ wi[i];
+                    containWord[ind] = true;
+                }
+            }
+            wi[i] = log(iCount / wi[i]);
+        }
+
+        for (auto& i: oArticles)
+        {
+            GetDescriptor(i);
+        }
+    }
+
+    void Dict::TestArticle(const vector<Mat>& iWord, Mat& oArticle) const
+    {
+        oArticle = Mat(1, leafCount, FLOAT_CV, 0.0);
+        for (const auto& i: iWord)
+        {
+            shared_ptr<Branch> ptr = root;
+            while (ptr->index == -1)
+            {
+                double closest = DBL_MAX;
+                size_t closest_j = 0;
+                for (size_t j = 0; j < ptr->children.size(); ++j)
+                {
+                    double dotP = norm(ptr->children[j]->midPoint, i, NORM_L2);
+                    if (dotP < closest)
+                    {
+                        closest = dotP;
+                        closest_j = j;
+                    }
+                }
+                ptr = ptr->children[closest_j];
+            }
+            oArticle.at<CV_TYPE>(0, ptr->index) += 1;
+        }
+        GetDescriptor(oArticle);
+    }
+}
